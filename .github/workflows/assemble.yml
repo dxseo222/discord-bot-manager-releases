@@ -1,0 +1,72 @@
+# Lives in the PUBLIC releases repo (dxseo222/discord-bot-manager-releases)
+# at .github/workflows/assemble.yml. A copy is kept here for reference;
+# scripts/publish-release.js installs it if it's missing.
+#
+# Joins installer pieces uploaded to a draft release back into one file,
+# on GitHub's servers. This is how releases get published from a network
+# that cuts off long uploads: small pieces get through, and the 100+ MB
+# installer is reassembled here, checked against the SHA-512 in
+# latest.yml, attached to the release, and the pieces are deleted.
+
+name: Assemble installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.1.6"
+        required: true
+      file:
+        description: "Installer file name, e.g. Discord-Bot-Manager-Setup-1.1.6.exe"
+        required: true
+      sha512:
+        description: "Expected SHA-512 (base64), as in latest.yml"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      # Inputs go through environment variables, never straight into
+      # the script, so they can't inject commands.
+      TAG: ${{ inputs.tag }}
+      FILE: ${{ inputs.file }}
+      EXPECTED_SHA512: ${{ inputs.sha512 }}
+    steps:
+      - name: Check inputs
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Bad tag: $TAG"; exit 1; }
+          [[ "$FILE" =~ ^[A-Za-z0-9._-]+\.exe$ ]] || { echo "Bad file name: $FILE"; exit 1; }
+          [[ "$EXPECTED_SHA512" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Bad checksum"; exit 1; }
+
+      - name: Download the pieces
+        run: |
+          mkdir pieces
+          gh release download "$TAG" --repo "$REPO" --dir pieces --pattern "$FILE.part*"
+          ls -l pieces
+
+      - name: Join and verify
+        run: |
+          cat $(ls pieces/"$FILE".part* | sort) > "$FILE"
+          actual=$(openssl dgst -sha512 -binary "$FILE" | base64 -w0)
+          echo "size: $(stat -c %s "$FILE") bytes"
+          if [ "$actual" != "$EXPECTED_SHA512" ]; then
+            echo "Checksum mismatch: the joined file is not the original installer."
+            exit 1
+          fi
+          echo "Checksum matches latest.yml."
+
+      - name: Attach the installer
+        run: gh release upload "$TAG" "$FILE" --repo "$REPO" --clobber
+
+      - name: Delete the pieces
+        run: |
+          for piece in pieces/"$FILE".part*; do
+            gh release delete-asset "$TAG" "$(basename "$piece")" --repo "$REPO" --yes
+          done
